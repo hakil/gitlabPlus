@@ -100,6 +100,27 @@ public final class BranchMatcher {
     return builder.toString();
   }
 
+  /**
+   * 从下拉显示文本中取出可用于匹配的分支名。
+   *
+   * <p>下拉项的显示形态是 {@code "[本地·已推送] dev"}。若直接拿它当查询串，
+   * 清理掉非 ASCII 后得到 {@code "[]dev"}，匹配不到任何分支，列表会被清空，
+   * 调用方随后读到空的分支名。</p>
+   */
+  public static String queryOf(String displayText) {
+    if (displayText == null) {
+      return "";
+    }
+    String text = displayText.trim();
+    if (text.startsWith("[")) {
+      int close = text.indexOf(']');
+      if (close > 0) {
+        text = text.substring(close + 1).trim();
+      }
+    }
+    return text;
+  }
+
   private record Hit(String name, int level, int length, int index) {
   }
 }

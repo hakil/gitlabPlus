@@ -77,6 +77,24 @@ class BranchMatcherTest extends SuiteTestSupport {
   }
 
   @Test
+  void displayTextIsStrippedBeforeMatching() {
+    // 回归：选中项显示为 "[本地·已推送] dev"，若直接当查询串，列表会被清空、
+    // 调用方随后读到空的分支名（新建 MR 目标分支为空的现场问题）
+    TestAssert.eq("剥离已推送标签", "dev", BranchMatcher.queryOf("[本地·已推送] dev"));
+    TestAssert.eq("剥离未推送标签", "dev", BranchMatcher.queryOf("[本地·未推送] dev"));
+    TestAssert.eq("剥离仅远程标签", "2.0.0", BranchMatcher.queryOf("[仅远程] 2.0.0"));
+    TestAssert.eq("纯分支名原样", "dev", BranchMatcher.queryOf("dev"));
+    TestAssert.eq("未闭合方括号原样", "[dev", BranchMatcher.queryOf("[dev"));
+    TestAssert.eq("null 返回空", "", BranchMatcher.queryOf(null));
+    TestAssert.eq("空串返回空", "", BranchMatcher.queryOf("  "));
+
+    List<String> matched =
+        BranchMatcher.filter(List.of("dev", "dev-1", "master"),
+                             BranchMatcher.queryOf("[本地·已推送] dev"));
+    TestAssert.eq("显示文本过滤后仍有候选", List.of("dev", "dev-1"), matched);
+  }
+
+  @Test
   void sanitizeKeepsVisibleAsciiOnly() {
     TestAssert.eq("普通分支名原样", "feature/login-1.0", BranchMatcher.sanitize("feature/login-1.0"));
     TestAssert.eq("中文被丢弃", "dev-", BranchMatcher.sanitize("dev-开发"));

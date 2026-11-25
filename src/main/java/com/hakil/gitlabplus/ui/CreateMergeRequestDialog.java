@@ -4,6 +4,7 @@ import com.hakil.gitlabplus.git.BranchLister;
 import com.hakil.gitlabplus.i18n.GitLabPlusBundle;
 import com.hakil.gitlabplus.git.BranchPusher;
 import com.hakil.gitlabplus.model.BranchMatcher;
+import com.hakil.gitlabplus.model.BranchOption;
 import com.hakil.gitlabplus.model.BranchOrdering;
 import com.hakil.gitlabplus.model.TemplateRenderer;
 import com.intellij.openapi.project.Project;
@@ -12,10 +13,12 @@ import com.intellij.openapi.ui.ValidationInfo;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.DefaultComboBoxModel;
+import javax.swing.DefaultListCellRenderer;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
+import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
@@ -27,6 +30,7 @@ import javax.swing.text.AbstractDocument;
 import javax.swing.text.AttributeSet;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.DocumentFilter;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.io.File;
 import java.util.ArrayList;
@@ -48,18 +52,8 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   /** 标记该 combo 已有一个排队中的过滤任务，避免连续输入堆积。 */
   private static final String KEY_FILTER_SCHEDULED = "gitlabplus.filterScheduled";
 
-  /** 下拉项：分支名 + 来源标识。 */
-  private record BranchItem(String name, boolean local, boolean pushed) {
-    @Override
-    public String toString() {
-      String scope = local ? (pushed ? "本地·已推送" : "本地·未推送") : "仅远程";
-      return "[" + scope + "] " + name;
-    }
-  }
-
-  private final JComboBox<BranchItem> sourceCombo = new JComboBox<>();
-  private final JComboBox<BranchItem> targetCombo = new JComboBox<>();
-  private final JTextField titleField = new JTextField(32);
+  private final JComboBox<BranchOption> sourceCombo = new JComboBox<>();
+  private final JComboBox<BranchOption> targetCombo = new JComboBox<>();  private final JTextField titleField = new JTextField(32);
   private final JTextArea descriptionArea = new JTextArea(6, 40);
   private final JLabel hintLabel = new JLabel(" ");
   private final JCheckBox removeSourceCheck = new JCheckBox(GitLabPlusBundle.message("create.removeSource"), true);
@@ -72,8 +66,8 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   private boolean titleAutoFilled = true;
   private boolean updatingTitle = false;
   /** 全量分支候选：输入过滤时从这里取，过滤不改变原始顺序。 */
-  private final List<BranchItem> sourceItems = new ArrayList<>();
-  private final List<BranchItem> targetItems = new ArrayList<>();
+  private final List<BranchOption> sourceItems = new ArrayList<>();
+  private final List<BranchOption> targetItems = new ArrayList<>();
   /** 防止重建下拉模型时编辑器文本变更再次触发过滤。 */
   private boolean filteringBranches;
 
@@ -152,11 +146,27 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
    * <p>不为标题框设 {@code setPreferredSize}：文本组件的宽度由列数决定，显式尺寸不生效，
    * 反而会让它比下拉窄一截。</p>
    */
+  /** 列表与弹出层渲染：显示带来源标签的文本，编辑器里仍只显示分支名。 */
+  private static final class BranchCellRenderer extends DefaultListCellRenderer {
+    @Override
+    public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                                                  boolean selected, boolean focused) {
+      Component component =
+          super.getListCellRendererComponent(list, value, index, selected, focused);
+      if (component instanceof JLabel label && value instanceof BranchOption option) {
+        label.setText(option.displayText());
+      }
+      return component;
+    }
+  }
+
   private void fillBranches(BranchLister.Branches branches,
                             String currentBranch,
                             String defaultTarget) {
     sourceCombo.setEditable(true);
     targetCombo.setEditable(true);
+    sourceCombo.setRenderer(new BranchCellRenderer());
+    targetCombo.setRenderer(new BranchCellRenderer());
     int fieldWidth = 560;
     sourceCombo.setPreferredSize(new Dimension(fieldWidth, sourceCombo.getPreferredSize().height));
     targetCombo.setPreferredSize(new Dimension(fieldWidth, targetCombo.getPreferredSize().height));
@@ -166,13 +176,13 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     List<String> orderedTargets = List.of();
     if (branches != null) {
       for (String name : BranchOrdering.orderSources(branches.sourceCandidates(), currentBranch)) {
-        sourceItems.add(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
+        sourceItems.add(new BranchOption(name, branches.isLocal(name), branches.isPushed(name)));
       }
       // 目标分支：场景推荐 → 上次使用 → 主干优先级 → 其余，减少手动选择
       orderedTargets =
           BranchOrdering.orderTargets(branches.targetCandidates(), defaultTarget, currentBranch);
       for (String name : orderedTargets) {
-        targetItems.add(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
+        targetItems.add(new BranchOption(name, branches.isLocal(name), branches.isPushed(name)));
       }
     }
     setItems(sourceCombo, sourceItems);
@@ -206,9 +216,9 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     installInputFilter(targetCombo, targetItems);
   }
 
-  private static void setItems(JComboBox<BranchItem> combo, List<BranchItem> items) {
-    DefaultComboBoxModel<BranchItem> model = new DefaultComboBoxModel<>();
-    for (BranchItem item : items) {
+  private static void setItems(JComboBox<BranchOption> combo, List<BranchOption> items) {
+    DefaultComboBoxModel<BranchOption> model = new DefaultComboBoxModel<>();
+    for (BranchOption item : items) {
       model.addElement(item);
     }
     combo.setModel(model);
@@ -220,7 +230,7 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
    * <p>重建 model 会重置编辑器内容，因此保存文本与光标后恢复；恢复动作再次触发
    * 文档事件，由 {@code filteringBranches} 拦住，否则会无限递归。</p>
    */
-  private void installInputFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+  private void installInputFilter(JComboBox<BranchOption> combo, List<BranchOption> all) {
     if (!(combo.getEditor().getEditorComponent() instanceof JTextField editor)) {
       return;
     }
@@ -255,7 +265,7 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
    * Swing 会抛 {@code IllegalStateException: Attempt to mutate in notification}。
    * 同一个 combo 只入队一次，执行时再读取最新文本，因此连续输入不会堆积。</p>
    */
-  private void scheduleFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+  private void scheduleFilter(JComboBox<BranchOption> combo, List<BranchOption> all) {
     if (filteringBranches || Boolean.TRUE.equals(combo.getClientProperty(KEY_FILTER_SCHEDULED))) {
       return;
     }
@@ -284,7 +294,7 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     }
   }
 
-  private void applyFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+  private void applyFilter(JComboBox<BranchOption> combo, List<BranchOption> all) {
     if (filteringBranches) {
       return;
     }
@@ -311,15 +321,15 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     refreshAutoTitle();
   }
 
-  private static List<BranchItem> filterItems(List<BranchItem> all, String query) {
+  private static List<BranchOption> filterItems(List<BranchOption> all, String query) {
     List<String> names = new ArrayList<>(all.size());
-    for (BranchItem item : all) {
+    for (BranchOption item : all) {
       names.add(item.name());
     }
-    List<String> matched = BranchMatcher.filter(names, query);
-    List<BranchItem> result = new ArrayList<>(matched.size());
+    List<String> matched = BranchMatcher.filter(names, BranchMatcher.queryOf(query));
+    List<BranchOption> result = new ArrayList<>(matched.size());
     for (String name : matched) {
-      BranchItem item = findByName(all, name);
+      BranchOption item = findByName(all, name);
       if (item != null) {
         result.add(item);
       }
@@ -327,11 +337,11 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     return result;
   }
 
-  private static BranchItem findByName(List<BranchItem> items, String name) {
+  private static BranchOption findByName(List<BranchOption> items, String name) {
     if (name == null) {
       return null;
     }
-    for (BranchItem item : items) {
+    for (BranchOption item : items) {
       if (item.name().equals(name)) {
         return item;
       }
@@ -339,14 +349,15 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     return null;
   }
 
-  private static void applyPrototype(JComboBox<BranchItem> combo) {
-    BranchItem longest = null;
+  private static void applyPrototype(JComboBox<BranchOption> combo) {
+    BranchOption longest = null;
     for (int i = 0; i < combo.getItemCount(); i++) {
-      BranchItem item = combo.getItemAt(i);
+      BranchOption item = combo.getItemAt(i);
       if (item == null) {
         continue;
       }
-      if (longest == null || item.toString().length() > longest.toString().length()) {
+      // 按展示文本（含标签）估算宽度，否则弹出层显示标签后会被截断
+      if (longest == null || item.displayText().length() > longest.displayText().length()) {
         longest = item;
       }
     }
@@ -355,10 +366,10 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     }
   }
 
-  private void selectByBranchName(JComboBox<BranchItem> combo, String branchName) {
+  private void selectByBranchName(JComboBox<BranchOption> combo, String branchName) {
     if (branchName != null && !branchName.isBlank()) {
       for (int i = 0; i < combo.getItemCount(); i++) {
-        BranchItem item = combo.getItemAt(i);
+        BranchOption item = combo.getItemAt(i);
         if (item != null && item.name().equals(branchName)) {
           combo.setSelectedIndex(i);
           return;
@@ -375,7 +386,7 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   private void updateHint() {
     // 按最终分支名取候选：输入过滤后下拉的选中项可能不是用户正在输入的那一项
     String sourceName = comboValue(sourceCombo);
-    BranchItem source = findByName(sourceItems, sourceName);
+    BranchOption source = findByName(sourceItems, sourceName);
     if (source == null) {
       hintLabel.setText(sourceName.isBlank()
                             ? " "
@@ -469,20 +480,15 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   }
 
   /** 可编辑下拉：编辑器文本与选中项一致时取分支名；否则视为手输。 */
-  private static String comboValue(JComboBox<BranchItem> combo) {
+  private static String comboValue(JComboBox<BranchOption> combo) {
     Object selected = combo.getSelectedItem();
     Object edited = combo.isEditable() ? combo.getEditor().getItem() : null;
     String editedText = edited == null ? "" : edited.toString().trim();
     if (!editedText.isEmpty()) {
-      if (selected instanceof BranchItem item && editedText.equals(item.toString())) {
-        return item.name();
-      }
-      if (!editedText.startsWith("[")) {
-        return editedText;
-      }
-      return "";
+      // 编辑器显示的就是分支名（标签只在渲染器里出现），因此非空即为有效值
+      return editedText;
     }
-    return selected instanceof BranchItem item ? item.name() : "";
+    return selected instanceof BranchOption item ? item.name() : "";
   }
 
   private static String escape(String text) {
