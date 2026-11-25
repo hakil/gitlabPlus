@@ -6,7 +6,7 @@ IntelliJ IDEA 插件，在 IDE 内完成 GitLab 合并请求的列表浏览、�
 
 | 项目 | 值 |
 | --- | --- |
-| 版本 | 0.2.1 |
+| 版本 | 0.3.0 |
 | 插件 ID | `com.hakil.gitlabplus` |
 | 目标 IDE | IntelliJ IDEA 2026.2 及以上（`since-build=262`） |
 | 实现语言 | Java 25，`javac` 直接构建 |
