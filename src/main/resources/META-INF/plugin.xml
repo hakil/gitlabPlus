@@ -2,10 +2,14 @@
 <idea-plugin>
   <id>com.hakil.gitlabplus</id>
   <name>GitLab+ Merge Tool</name>
-  <version>0.3.0</version>
+  <version>0.3.1</version>
   <vendor url="https://github.com/hakil/GitLabPlus" email="hakil@vip.qq.com">caidailian</vendor>
 
   <change-notes><![CDATA[
+    <h3>0.3.1</h3>
+    <ul>
+      <li>修复：新建 MR 时从下拉选择分支后，输入框可能残留「[]」并被判定为空分支（现已将分支值与来源标签分离，编辑器只显示分支名）</li>
+    </ul>
     <h3>0.3.0</h3>
     <ul>
       <li>新建 MR：源分支与目标分支下拉支持输入即时匹配（完全相等 &gt; 前缀 &gt; 包含，同层按名称长度升序）</li>

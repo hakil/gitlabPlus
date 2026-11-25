@@ -6,7 +6,7 @@ An IntelliJ IDEA plugin for GitLab merge requests: browse the list, read details
 
 | Item | Value |
 | --- | --- |
-| Version | 0.3.0 |
+| Version | 0.3.1 |
 | Plugin ID | `com.hakil.gitlabplus` |
 | Target IDE | IntelliJ IDEA 2026.2+ (`since-build=262`) |
 | Language | Java 25, built with plain `javac` |
