@@ -3,6 +3,7 @@ package com.hakil.gitlabplus.ui;
 import com.hakil.gitlabplus.git.BranchLister;
 import com.hakil.gitlabplus.i18n.GitLabPlusBundle;
 import com.hakil.gitlabplus.git.BranchPusher;
+import com.hakil.gitlabplus.model.BranchMatcher;
 import com.hakil.gitlabplus.model.BranchOrdering;
 import com.hakil.gitlabplus.model.TemplateRenderer;
 import com.intellij.openapi.project.Project;
@@ -10,6 +11,7 @@ import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.ValidationInfo;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
@@ -18,10 +20,16 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
 import java.awt.Dimension;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +44,9 @@ import java.util.Map;
  * 而推送被拒绝（远程有新提交）时会停止并要求先 Pull 解决冲突。</p>
  */
 public final class CreateMergeRequestDialog extends DialogWrapper {
+
+  /** 标记该 combo 已有一个排队中的过滤任务，避免连续输入堆积。 */
+  private static final String KEY_FILTER_SCHEDULED = "gitlabplus.filterScheduled";
 
   /** 下拉项：分支名 + 来源标识。 */
   private record BranchItem(String name, boolean local, boolean pushed) {
@@ -60,6 +71,11 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   /** 用户是否仍在使用自动生成的标题（手改后不再跟随目标分支）。 */
   private boolean titleAutoFilled = true;
   private boolean updatingTitle = false;
+  /** 全量分支候选：输入过滤时从这里取，过滤不改变原始顺序。 */
+  private final List<BranchItem> sourceItems = new ArrayList<>();
+  private final List<BranchItem> targetItems = new ArrayList<>();
+  /** 防止重建下拉模型时编辑器文本变更再次触发过滤。 */
+  private boolean filteringBranches;
 
   public CreateMergeRequestDialog(Project project,
                                   BranchLister.Branches branches,
@@ -150,15 +166,17 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     List<String> orderedTargets = List.of();
     if (branches != null) {
       for (String name : BranchOrdering.orderSources(branches.sourceCandidates(), currentBranch)) {
-        sourceCombo.addItem(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
+        sourceItems.add(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
       }
       // 目标分支：场景推荐 → 上次使用 → 主干优先级 → 其余，减少手动选择
       orderedTargets =
           BranchOrdering.orderTargets(branches.targetCandidates(), defaultTarget, currentBranch);
       for (String name : orderedTargets) {
-        targetCombo.addItem(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
+        targetItems.add(new BranchItem(name, branches.isLocal(name), branches.isPushed(name)));
       }
     }
+    setItems(sourceCombo, sourceItems);
+    setItems(targetCombo, targetItems);
 
     selectByBranchName(sourceCombo, currentBranch);
     selectByBranchName(targetCombo,
@@ -169,13 +187,156 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
     applyPrototype(targetCombo);
 
     sourceCombo.addActionListener(e -> {
+      if (filteringBranches) {
+        return;
+      }
       updateHint();
       refreshAutoTitle();
     });
     targetCombo.addActionListener(e -> {
+      if (filteringBranches) {
+        return;
+      }
       updateHint();
       refreshAutoTitle();
     });
+
+    // 必须在选中与 prototype 之后安装：选中会改动编辑器文本，装早了会立刻触发一次过滤
+    installInputFilter(sourceCombo, sourceItems);
+    installInputFilter(targetCombo, targetItems);
+  }
+
+  private static void setItems(JComboBox<BranchItem> combo, List<BranchItem> items) {
+    DefaultComboBoxModel<BranchItem> model = new DefaultComboBoxModel<>();
+    for (BranchItem item : items) {
+      model.addElement(item);
+    }
+    combo.setModel(model);
+  }
+
+  /**
+   * 输入即过滤：按 {@link BranchMatcher} 的层级规则把下拉项缩到匹配项。
+   *
+   * <p>重建 model 会重置编辑器内容，因此保存文本与光标后恢复；恢复动作再次触发
+   * 文档事件，由 {@code filteringBranches} 拦住，否则会无限递归。</p>
+   */
+  private void installInputFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+    if (!(combo.getEditor().getEditorComponent() instanceof JTextField editor)) {
+      return;
+    }
+    // 字符白名单：中文等输入法的组合期字符不进文档，因此不产生组合事件，
+    // 也就不会在打字过程中重建模型、打断输入法
+    if (editor.getDocument() instanceof AbstractDocument document) {
+      document.setDocumentFilter(new AsciiInputFilter());
+    }
+    DocumentListener listener = new DocumentListener() {
+      @Override
+      public void insertUpdate(DocumentEvent e) {
+        scheduleFilter(combo, all);
+      }
+
+      @Override
+      public void removeUpdate(DocumentEvent e) {
+        scheduleFilter(combo, all);
+      }
+
+      @Override
+      public void changedUpdate(DocumentEvent e) {
+        scheduleFilter(combo, all);
+      }
+    };
+    editor.getDocument().addDocumentListener(listener);
+  }
+
+  /**
+   * 把过滤延后到事件循环。
+   *
+   * <p>不能在文档事件回调里直接改下拉模型：{@code setModel} 会经编辑器写回文档，
+   * Swing 会抛 {@code IllegalStateException: Attempt to mutate in notification}。
+   * 同一个 combo 只入队一次，执行时再读取最新文本，因此连续输入不会堆积。</p>
+   */
+  private void scheduleFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+    if (filteringBranches || Boolean.TRUE.equals(combo.getClientProperty(KEY_FILTER_SCHEDULED))) {
+      return;
+    }
+    combo.putClientProperty(KEY_FILTER_SCHEDULED, Boolean.TRUE);
+    SwingUtilities.invokeLater(() -> {
+      combo.putClientProperty(KEY_FILTER_SCHEDULED, Boolean.FALSE);
+      applyFilter(combo, all);
+    });
+  }
+
+  /** 只允许可见 ASCII 进入文档（分支名不需要中文）。 */
+  private static final class AsciiInputFilter extends DocumentFilter {
+    @Override
+    public void insertString(FilterBypass fb, int offset, String text, AttributeSet attrs)
+        throws BadLocationException {
+      String cleaned = BranchMatcher.sanitize(text);
+      if (!cleaned.isEmpty()) {
+        super.insertString(fb, offset, cleaned, attrs);
+      }
+    }
+
+    @Override
+    public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
+        throws BadLocationException {
+      super.replace(fb, offset, length, BranchMatcher.sanitize(text), attrs);
+    }
+  }
+
+  private void applyFilter(JComboBox<BranchItem> combo, List<BranchItem> all) {
+    if (filteringBranches) {
+      return;
+    }
+    filteringBranches = true;
+    try {
+      JTextField editor = (JTextField) combo.getEditor().getEditorComponent();
+      String text = editor.getText();
+      int caret = editor.getCaretPosition();
+      setItems(combo, filterItems(all, text));
+      // setModel 之后编辑器可能被替换，重新获取再写回文本
+      JTextField fresh = (JTextField) combo.getEditor().getEditorComponent();
+      fresh.setText(text);
+      fresh.setCaretPosition(Math.max(0, Math.min(caret, text.length())));
+      if (text != null && !text.isBlank() && combo.isShowing() && !combo.isPopupVisible()
+          && combo.getItemCount() > 0) {
+        combo.showPopup();
+      }
+    }
+    finally {
+      filteringBranches = false;
+    }
+    // 重建模型期间的 ActionEvent 被守卫拦掉，这里补一次刷新
+    updateHint();
+    refreshAutoTitle();
+  }
+
+  private static List<BranchItem> filterItems(List<BranchItem> all, String query) {
+    List<String> names = new ArrayList<>(all.size());
+    for (BranchItem item : all) {
+      names.add(item.name());
+    }
+    List<String> matched = BranchMatcher.filter(names, query);
+    List<BranchItem> result = new ArrayList<>(matched.size());
+    for (String name : matched) {
+      BranchItem item = findByName(all, name);
+      if (item != null) {
+        result.add(item);
+      }
+    }
+    return result;
+  }
+
+  private static BranchItem findByName(List<BranchItem> items, String name) {
+    if (name == null) {
+      return null;
+    }
+    for (BranchItem item : items) {
+      if (item.name().equals(name)) {
+        return item;
+      }
+    }
+    return null;
   }
 
   private static void applyPrototype(JComboBox<BranchItem> combo) {
@@ -212,9 +373,13 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
   }
 
   private void updateHint() {
-    BranchItem source = selectedItem(sourceCombo);
+    // 按最终分支名取候选：输入过滤后下拉的选中项可能不是用户正在输入的那一项
+    String sourceName = comboValue(sourceCombo);
+    BranchItem source = findByName(sourceItems, sourceName);
     if (source == null) {
-      hintLabel.setText(" ");
+      hintLabel.setText(sourceName.isBlank()
+                            ? " "
+                            : GitLabPlusBundle.message("create.hint.unknownBranch", escape(sourceName)));
       return;
     }
     if (source.local() && !source.pushed()) {
@@ -301,11 +466,6 @@ public final class CreateMergeRequestDialog extends DialogWrapper {
 
   public boolean squash() {
     return squashCheck.isSelected();
-  }
-
-  private static BranchItem selectedItem(JComboBox<BranchItem> combo) {
-    Object value = combo.getSelectedItem();
-    return value instanceof BranchItem item ? item : null;
   }
 
   /** 可编辑下拉：编辑器文本与选中项一致时取分支名；否则视为手输。 */
